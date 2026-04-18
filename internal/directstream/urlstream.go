@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"seanime/internal/api/anilist"
-	hibiketorrent "seanime/internal/extension/hibike/torrent"
 	"seanime/internal/library/anime"
 	"seanime/internal/mkvparser"
 	"seanime/internal/nativeplayer"
@@ -13,48 +12,43 @@ import (
 )
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Debrid
+// URL Stream
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-var _ Stream = (*DebridStream)(nil)
+var _ Stream = (*URLStream)(nil)
 
-// DebridStream is a stream sourced from a debrid provider.
-type DebridStream struct {
+// URLStream is an HTTP-proxied stream sourced from an arbitrary URL (e.g. from a plugin).
+type URLStream struct {
 	httpBaseStream
-	torrent       *hibiketorrent.AnimeTorrent
-	streamReadyCh chan struct{} // Closed by the initiator when the stream URL is resolved
 }
 
-func (s *DebridStream) Type() nativeplayer.StreamType {
-	return nativeplayer.StreamTypeDebrid
+func (s *URLStream) Type() nativeplayer.StreamType {
+	return nativeplayer.StreamTypeURL
 }
 
-func (s *DebridStream) LoadPlaybackInfo() (*nativeplayer.PlaybackInfo, error) {
+func (s *URLStream) LoadPlaybackInfo() (*nativeplayer.PlaybackInfo, error) {
 	return s.httpBaseStream.loadPlaybackInfo(s.Type())
 }
 
-func (s *DebridStream) GetStreamHandler() http.Handler {
+func (s *URLStream) GetStreamHandler() http.Handler {
 	return s.httpBaseStream.getStreamHandler(s)
 }
 
-func (s *DebridStream) GetAttachmentByName(filename string) (*mkvparser.AttachmentInfo, bool) {
+func (s *URLStream) GetAttachmentByName(filename string) (*mkvparser.AttachmentInfo, bool) {
 	return getAttachmentByName(s.manager.playbackCtx, s, filename)
 }
 
-type PlayDebridStreamOptions struct {
+type PlayURLStreamOptions struct {
 	StreamUrl    string
-	MediaId      int
-	AnidbEpisode string // Anizip episode
+	AnidbEpisode string
 	Media        *anilist.BaseAnime
-	Torrent      *hibiketorrent.AnimeTorrent // Selected torrent
-	FileId       string                      // File ID or index
-	UserAgent    string
 	ClientId     string
-	AutoSelect   bool
 }
 
-// PlayDebridStream is used by a module to load a new debrid stream.
-func (m *Manager) PlayDebridStream(ctx context.Context, filepath string, opts PlayDebridStreamOptions) error {
+// PlayURLStream starts built-in player playback for an arbitrary HTTP URL with progress tracking.
+func (m *Manager) PlayURLStream(ctx context.Context, opts PlayURLStreamOptions) error {
+	m.ResetOpenState(opts.ClientId)
+
 	episodeCollection, err := anime.NewEpisodeCollection(anime.NewEpisodeCollectionOptions{
 		AnimeMetadata:       nil,
 		Media:               opts.Media,
@@ -62,37 +56,32 @@ func (m *Manager) PlayDebridStream(ctx context.Context, filepath string, opts Pl
 		Logger:              m.Logger,
 	})
 	if err != nil {
-		return fmt.Errorf("cannot play local file, could not create episode collection: %w", err)
+		return fmt.Errorf("cannot play URL stream, could not create episode collection: %w", err)
 	}
 
 	episode, ok := episodeCollection.FindEpisodeByAniDB(opts.AnidbEpisode)
 	if !ok {
-		return fmt.Errorf("cannot play debrid stream, could not find episode: %s", opts.AnidbEpisode)
+		return fmt.Errorf("cannot play URL stream, could not find episode: %s", opts.AnidbEpisode)
 	}
 
-	stream := &DebridStream{
-		torrent: opts.Torrent,
+	stream := &URLStream{
 		httpBaseStream: httpBaseStream{
 			streamUrl: opts.StreamUrl,
-			filepath:  filepath,
+			filepath:  "",
 			BaseStream: BaseStream{
 				manager:               m,
 				logger:                m.Logger,
 				clientId:              opts.ClientId,
 				media:                 opts.Media,
-				filename:              "",
 				episode:               episode,
 				episodeCollection:     episodeCollection,
 				subtitleEventCache:    result.NewMap[string, *mkvparser.SubtitleEvent](),
 				activeSubtitleStreams: result.NewMap[string, *SubtitleStream](),
 			},
 		},
-		streamReadyCh: make(chan struct{}),
 	}
 
-	go func() {
-		m.loadStream(stream)
-	}()
+	go m.loadStream(stream)
 
 	return nil
 }
